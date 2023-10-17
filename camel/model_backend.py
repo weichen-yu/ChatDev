@@ -22,6 +22,9 @@ from camel.typing import ModelType
 from chatdev.statistics import prompt_cost
 from chatdev.utils import log_and_print_online
 
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer
+import torch
 
 class ModelBackend(ABC):
     r"""Base class for different model backends.
@@ -40,6 +43,36 @@ class ModelBackend(ABC):
         """
         pass
 
+class LocalModel(ModelBackend):
+    r"""local model, but try to return in a unified openai ModelBackend interface."""
+    def __init__(self, model_type: ModelType, model_config_dict: Dict) -> None:
+        super().__init__()
+        self.model_type = model_type
+        self.model_config_dict = model_config_dict
+    
+    @retry(tries=-1, delay=0, max_delay=None, backoff=1, jitter=0)
+    def run(self, *args, **kwargs) -> Dict[str, Any]:
+        string = "\n".join([message["content"] for message in kwargs["messages"]])
+        encoding = tiktoken.encoding_for_model(self.model_type.value)
+        num_prompt_tokens = len(encoding.encode(string))
+        gap_between_send_receive = 15 * len(kwargs["messages"])
+        num_prompt_tokens += gap_between_send_receive
+
+        num_max_token_map = {
+            "AlekseyKorshuk/vicuna-7b": 1024,
+        }
+        num_max_token = num_max_token_map[self.model_type.value]
+        num_max_completion_tokens = num_max_token - num_prompt_tokens
+        self.model_config_dict['max_tokens'] = num_max_completion_tokens
+
+        model_name = self.model_type.value
+        model = LlamaForCausalLM.from_pretrained(model_name).cuda()
+        tokenizer = LlamaTokenizer.from_pretrained(model_name)
+        torch.set_grad_enabled(False)
+        output = model.generate(prompt, max_length=num_max_token, num_return_sequences=1, return_dict_in_generate=True, output_scores=True)
+        generated_tokens  = output[0][0][num_prompt_tokens:]
+        generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return response
 
 class OpenAIModel(ModelBackend):
     r"""OpenAI API in a unified ModelBackend interface."""
@@ -124,6 +157,10 @@ class ModelFactory:
             model_class = OpenAIModel
         elif model_type == ModelType.STUB:
             model_class = StubModel
+        elif model_type in {
+            ModelType.Vicuna_7b
+        }:
+            model_class = LocalModel
         else:
             raise ValueError("Unknown model")
 
